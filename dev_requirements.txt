@@ -1,5 +1,5 @@
 -e .
 
-
+sphinx
 pytest
 mock
