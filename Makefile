@@ -63,9 +63,9 @@ coverage:
 docs:
 	rm -f docs/deadlines.rst
 	rm -f docs/modules.rst
-	sphinx-apidoc -o docs/ deadlines
-	$(MAKE) -C docs clean
-	$(MAKE) -C docs html
+	$(VENV)/bin/sphinx-apidoc -o docs/ deadlines
+	$(MAKE) -e "SPHINXBUILD=../$(VENV)/bin/sphinx-build" -C docs clean
+	$(MAKE) -e "SPHINXBUILD=../$(VENV)/bin/sphinx-build" -C docs html
 	open docs/_build/html/index.html
 
 release: clean
