@@ -1,0 +1,352 @@
+#+TITLE: Deadlines: Stable Declarative Pipelines
+
+* Deadlines: Stable Declarative Pipelines
+
+Deadlines provides a way to:
+
+ - define pipelines based on targets, tasks and resources
+ - schedule pipelines to run at specified times
+ - record each pipeline's progress or failure
+
+** Deadlines Flow Chart
+
+#+begin_src dot :file flowchart.png
+  digraph FlowChart {
+          plan -> planner -> execution_plan -> executor;
+          plan [shape=note, label="Plan YAML"];
+          planner [label="Planner"];
+          execution_plan [shape=record, label="{Tasks | Arguments}"];
+          executor [label="Executor"];
+  }
+#+end_src
+
+The deadlines planner accepts a YAML file describing what targets are
+required. It also describes when the plan should be executed (or when
+it should be finished by). The planner takes the specified tasks,
+targets and resources and compiles a list of tasks that need to be
+executed along with any arguments those tasks require.
+
+** Specifying Tasks
+
+Tasks are `luigi.Task` classes specified by a Python package. The
+Python package can include targets and tasks specified by
+`deadlines.targets` and `deadlines.tasks` entrypoints. If a task or
+target specified hasn't been installed, deadlines will try to install
+it in order to verify it is a valid task or target. Similarly, when
+creating an execution plan, the planner will use its list of installed
+tasks and/or targets to understand what tasks should be called in
+order to create the specified target.
+
+For example, we have a package that defines a `mypkg.CDNResource`
+target. We also have a `mypkg.CDNTask` will write an input file to a
+CDN. If our plan requires that we have a file
+`mypkg.CDNResource('foo.jpg')` the planner finds the `mypkg.CDNTask`
+that provides that functionality and adds it to the execution plan.
+
+Often times a task will require specific arguments in order work. In
+these cases, the user can expose a Planner Task that will accept the
+arguments provided by default as well as expose any other required
+arguments that task (and potential subtasks) might require.
+
+For example:
+
+#+begin_src python
+  import luigi
+  import utc
+
+
+  class CDNResourcePlanner(luigi.Task):
+
+      # Default arguments passed in by the scheduler
+      start = luigi.DateParameter()
+      end = luigi.DateParameter()
+
+      # Required arguments for the subtasks
+      cdn_upload_key = luigi.Parameter()
+      cdn_upload_base = luigi.Parameter()
+      filename = luigi.Parameter()
+
+      def output(self):
+          # The output is used by the planner to determine if this task
+          # fufills a specific target requirement.
+          now = utc.now().strftime('%Y-%m-%d')
+          return [CDNResource('%s-%s' % (now, self.filename))]
+#+end_src
+
+If a task or target doesn't exist, deadlines will attempt to download
+and install the package. This ensures that when we try to run the task
+using the execution system, we can successfully download it and
+install its requirements.
+
+** The Executor: Dadd
+
+Excution is performed by Dadd and a central luigi scheduler. Dadd
+handles the process of accepting a task spec and executing the task on
+a node. Dadd ensures that if there is a failure it is recorded and an
+email is sent before cleaning up the task's environment.
+
+*** Dadd Excecution Flow
+
+#+begin_src dot :file daddflow.png
+  digraph DaddFlow {
+          spec -> dadd_master -> dadd_node -> dadd_daemon -> task_proc;
+          dadd_master -> master_process -> dadd_master [style=dotted, dir=none];
+          dadd_node -> node_process -> dadd_node [style=dotted, dir=none];
+          dadd_daemon -> dadd_master [style=dashed, xlabel="Report Success / Failure"];
+          task_proc -> luigi_scheduler [style=dashed, xlabel="Report Running Tasks"];
+
+          luigi_scheduler [label="Luigi Scheduler"];
+          task_proc [label="Task Process"];
+          spec [shape=record, label="{command | files | python packages}"];
+          dadd_master [label="The Dadd Master"];
+          dadd_node [label="A Dadd Node"];
+          dadd_daemon [label="Dadd Daemon"];
+          node_process [shape=record,
+                        label="{Create Temp Env | Install Virtualenv | Download Files | Install Python Packages | Run Commmand in Dadd Daemon}"];
+          master_process [shape=record,
+                          label="{Find Node | Submit Spec to Node}"];
+
+  }
+#+end_src
+
+It should be noted that if a Dadd node is killed, the daemons it
+started continue to run. When the daemon finishes it will remove the
+temporary directory and files it might have downloaded.
+
+*** Execution of Multiple Processes
+
+The execution model allows processing across nodes using the following
+algorithm.
+
+ 1. For each target, spawn a task to create that target
+
+ 2. Each task is submitted to the Dadd master which in turn starts the
+    tasks as needed.
+
+ 3. The task will connect with the central luigi scheduler to verify
+    there is work to be done.
+
+ 4. Repeat this process periodically to ensure any casual failures are
+    recovered from.
+
+The spec can specify that no more than X number of nodes should be
+used. The Deadlines service will then periodically resubmit the the
+job until the Dadd Master and Luigi services report the job as being
+done.
+
+** Deadlines Reporting
+
+Deadlines keeps tracks of what jobs it has started. This includes
+references to the respective Luigi Scheduler interface as well as the
+Dadd processes.
+
+Currently, the Luigi Scheduler doesn't necessarily provide a good API
+(that I know of) for this aspect. This would be something worth
+building. We could also consider taking the current scheduler from
+the luigi scheduler and its graph pieces and move them directly into
+deadlines.
+
+** Scheduling
+
+The initial iteration of Deadlines will focus on a single submission
+trigger to start the processes mentioned above. This can be triggered
+using the celery's cron functionality.
+
+With that said, I'd propose to use [[http://apscheduler.readthedocs.org/en/3.0/][Advanced Python Scheduler]] to
+implement the scheduling of tasks.
+
+** Baseline User Experience
+
+The basic requirement for a user is to:
+
+ 1. Write a pipeline definition in YAML
+ 2. Convert task requirements to proper requirements in the pipeline
+    YAML
+
+For creating custom tasks, the user must provide a Python package that
+exists on our cheeseshop. In the case of a complex task, the user
+must also understand enough about luigi in order to construct a proper
+task that can be started from the scheduler.
+
+** Task / Target Library
+
+For most tasks, the goal is to provide a library of targets and tasks
+that will help in migrating data as needed. Here are some basic use
+cases:
+
+ - Create a new Dataset / Datafile base on PDL Current and the latest
+   BIX Metrics using Redshift:
+
+   - Targets:
+     - Datafile
+     - Dataset
+     - QQ7Csv
+     - QQ7PDLCsv
+     - RedshiftTable
+
+   - Potential Task:
+     - PDLCurrentTask
+     - BIXMetricsTask
+     - BIXDailyTask
+     - SyncRedshift
+     - RedshiftQuery
+
+   - Description: The different Dataset / Datafile ETL tasks would
+     each run to ensure the necessary dependencies are there before
+     syncing them to Redshift. The RedshiftQuery could then query
+     redshift and dump the results to S3 or Pangaea.
+
+ - Dump the latest logs from our log host to Pangaea every day.
+   - Targets: SSHHostFile
+   - Potential Task: PangaeaUpload
+   - Description: The task uploads a file on some host to a Pangaea
+     dataset.
+
+ - Download Gryphon Data and save it to the project server
+   - Targets:
+     - SurveyData
+     - S3Target
+   - Potential Task: SurveyDataDownload
+   - Description: The task would download the data from Gryphon to a
+     local folder before copying it to the file server.
+
+
+The current ETLs would all be migrated to tasks in a new pangaea.tasks
+package. This package would then be installed into deadlines, but more
+importantly, when the task runs on a dadd node, the newest version
+will be used avoiding the need to keep Deadlines in close sync with
+Pangaea ETLs.
+
+** Defining a Pipeline
+Here is a bare minimum pipeline definition that will basically create
+a file from scratch and save it to S3.
+
+#+begin_src yaml
+  name: Upload 100 Bottles of Beer Lyrics
+  schedule: daily
+  task: mypkg.BottlesOfBeerLyrics
+  args:
+    AWS_ACCESS_KEY_ID: ajjaohdlfkajshdfl
+    AWS_SECRET_ACCESS_KEY: laj;sdlkfjalsdjfakhjflakjh
+#+end_src
+
+The args are passed to the task in the constructor just as Luigi does
+normally.
+
+It should be noted that if a task ends up calling a number of
+subtasks, the initial task will need to be responsible for passing the
+subsequent arguments as needed.
+
+For example:
+
+#+begin_src python
+  class A(Task):
+      foo = Parameter()
+      bar = Parameter()
+      baz = Parameter()
+
+      def requires(self):
+          return [B(self.foo), C(self.bar)]
+
+      def output(self):
+          return LocalTarget('%s.csv.gz' % self.foo)
+
+      def run(self):
+          with self.output('r').open() as fh:
+              for i in range(1, 100):
+                  fh.write('%s bottles of beer on the wall\n' % i)
+#+end_src
+
+In this example our task accept `foo`, `bar` and `baz` arguments even
+though `run` method only requires `foo`. This is a valid way to create
+a super Task that wraps the subsequent required tasks.
+
+*** The Schedule
+
+The schedule can be written in a few helpful formats to make it easier
+for users. For example, in our minimal example we used `daily` as a
+value. The planner effectively translates this to:
+
+#+begin_src yaml
+  # Assuming the time was 11:34:12
+  schedule:
+    hour: 11
+    minutes: 34
+    seconds: 12
+    days: *
+    months: *
+    years: *
+#+end_src
+
+This uses a more verbose cron-like meaning to run the task daily. We
+can also specify a time:
+
+#+begin_src yaml
+schedule: daily @ 11:30pm
+#+end_src
+
+In this case the planner will parse the time and be sure it is
+scheduled daily at 11:30pm.
+
+Here is the basic grammar.
+
+#+begin_src text
+  schedule        := period, @, datetime_string
+  period          := "daily" / "bi-weekly" / "weekly" / "monthly"
+  datetime_string := ISO-8601 / day, times
+  <times>         := %I:%M:%S%p /
+                     %I:%M:%S %p /
+                     %I:%M%p /
+                     %I:%M %p /
+                     %H:%M /
+                     %H:%M:%S /
+                     %H:%M:%S
+  <day>           := %a / %A  # Mon or Monday
+#+end_src
+
+There can be as many formats as we'd like to support.
+
+If a format cannot be recognized an error will be thrown. For example,
+a schedule specifying "daily @ Mon 12:30pm" is incorrect because a
+daily occurance must happen every day, not just on Mondays.
+
+*** Dynamic Definitions
+
+There are many cases where a scheduled pipeline would want to utilize
+variables when describing what needs to be done. For example, if a job
+needed to execute daily, you might want to pass in the current date
+and the previous day as arguments when finding the targets that need
+to be created. We can do this using replacements in our Pipeline YAML.
+
+#+begin_src yaml
+  name: Daily Mail
+  schedule: daily
+  task: DailyMail
+  args:
+    start_date: $yesterday
+    end_date: $now
+#+end_src
+
+When the Planner receives this pipeline definition it will replace the
+arguments with the current datetime and "yesterday", the current
+datetime minus 1 day.
+
+** Other Ideas
+
+*** Multiple Tasks in a Pipeline
+
+If someone needed to set up a set of tasks that may not be entirely
+related, but that use the same arguments.
+
+#+begin_src yaml
+  name: Daily Jobs
+  schedule: daily
+  tasks:
+    - BIXDaily
+    - BIXMetrics
+    - DailyStats
+
+  args:
+    start_date: $yesterday
+    end_date: $now
+#+end_src

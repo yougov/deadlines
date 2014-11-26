@@ -11,7 +11,11 @@ except ImportError:
 readme = open('README.rst').read()
 
 requirements = [
-    # TODO: put package requirements here
+    'flask',
+    'flask-sqlalchemy',
+    'psycopg2',
+    'cherrypy',
+    'cytoolz',
 ]
 
 setup(

@@ -1,28 +1,14 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
-"""
-test_deadlines
-----------------------------------
-
-Tests for `deadlines` module.
-"""
-
-import unittest
-
-from deadlines import deadlines
+from deadlines.models import Schedule
 
 
-class TestDeadlines(unittest.TestCase):
+class TestDeadlineDocument(object):
 
-    def setUp(self):
-        pass
+    def test_parse(self):
+        doc = {
+            'schedule': 'daily',
+            'targets': 'http://foo.com/path/to/result.csv'
+        }
 
-    def test_something(self):
-        pass
+        result = Schedule.from_doc(doc)
 
-    def tearDown(self):
-        pass
-
-if __name__ == '__main__':
-    unittest.main()
+        assert result.scope == 'daily'
