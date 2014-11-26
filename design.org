@@ -8,21 +8,25 @@ Deadlines provides a way to:
  - schedule pipelines to run at specified times
  - record each pipeline's progress or failure
 
-** Deadlines Flow Chart
+Here is a high level overview of how deadlines takes a specification
+for a task and runs it as needed
 
 #+begin_src dot :file flowchart.png
   digraph FlowChart {
-          plan -> planner -> execution_plan -> executor;
+          plan -> planner;
+          planner -> execution_plan -> schedule [style=dashed];
+          schedule -> executor;
           plan [shape=note, label="Pipeline YAML"];
           planner [label="Planner"];
           execution_plan [shape=record, label="{Tasks | Arguments}"];
           executor [label="Executor"];
+          schedule [shape=diamond, label="Cron-like\n Scheduler"]
   }
 #+end_src
 
 The deadlines planner accepts a Pipline YAML file describing what
 targets are required. It also describes when the plan should be
-executed (or when it should be finished by). The planner takes the
+executed (or when it should be finished by[fn:4]). The planner takes the
 specified tasks and compiles a list of tasks that need to be executed
 along with any arguments those tasks require.
 
@@ -39,7 +43,7 @@ a file from scratch and save it to S3.
     AWS_SECRET_ACCESS_KEY: laj;sdlkfjalsdjfakhjflakjh
 #+end_src
 
-The args are passed to the task in the constructor just as Luigi does
+The =args= are passed to the task in the constructor just as Luigi does
 normally.
 
 It should be noted that if a task ends up calling a number of
@@ -66,14 +70,14 @@ For example:
                   fh.write('%s bottles of beer on the wall\n' % i)
 #+end_src
 
-In this example our task accept `foo`, `bar` and `baz` arguments even
-though `run` method only requires `foo`. This is a valid way to create
+In this example our task accept =foo=, =bar= and =baz= arguments even
+though =run= method only requires =foo=. This is a valid way to create
 a super Task that wraps the subsequent required tasks.
 
 *** The Schedule
 
 The schedule can be written in a few helpful formats to make it easier
-for users. For example, in our minimal example we used `daily` as a
+for users. For example, in our minimal example we used =daily= as a
 value. The planner effectively translates this to:
 
 #+begin_src yaml
@@ -87,7 +91,7 @@ value. The planner effectively translates this to:
     years: *
 #+end_src
 
-This uses a more verbose cron-like meaning to run the task daily. We
+This uses a more verbose cron-like meaning[fn:3] to run the task daily. We
 can also specify a time:
 
 #+begin_src yaml
@@ -168,7 +172,7 @@ The list of available values would be provided for the user when
 defining the pipeline in order to avoid unnecessary and error prone
 repition in pipeline definitions.
 
-** Specifying Tasks
+*** Specifying Tasks
 
 Tasks are `luigi.Task` classes specified by a Python package. The
 Python package can include targets and tasks specified by
@@ -179,46 +183,41 @@ creating an execution plan, the planner will use its list of installed
 tasks and/or targets to understand what tasks should be called in
 order to create the specified target.
 
-For example, we have a package that defines a `mypkg.CDNResource`
-target. We also have a `mypkg.CDNTask` will write an input file to a
-CDN. If our plan requires that we have a file
-`mypkg.CDNResource('foo.jpg')` the planner finds the `mypkg.CDNTask`
-that provides that functionality and adds it to the execution plan.
+For example, here is a elided =setup.py= for =mypkg= that supplies some
+targets and tasks for working with a CDN.
 
-Often times a task will require specific arguments in order work. In
-these cases, the user can expose a Planner Task that will accept the
-arguments provided by default as well as expose any other required
-arguments that task (and potential subtasks) might require.
-
-For example:
-
-#+begin_src python
-  import luigi
-  import utc
-
-
-  class CDNResourcePlanner(luigi.Task):
-
-      # Default arguments passed in by the scheduler
-      start = luigi.DateParameter()
-      end = luigi.DateParameter()
-
-      # Required arguments for the subtasks
-      cdn_upload_key = luigi.Parameter()
-      cdn_upload_base = luigi.Parameter()
-      filename = luigi.Parameter()
-
-      def output(self):
-          # The output is used by the planner to determine if this task
-          # fufills a specific target requirement.
-          now = utc.now().strftime('%Y-%m-%d')
-          return [CDNResource('%s-%s' % (now, self.filename))]
-#+end_src
+#+BEGIN_SRC python
+  setup(
+      entry_points={
+          'deadlines.tasks': [
+              'mypkg.tasks:CDNUploadTask'
+          ],
+          'deadlines.targets': [
+              'mypkg.tasks:CDNResource'
+          ]
+      }
+  )
+#+END_SRC
 
 If a task or target doesn't exist, deadlines will attempt to download
 and install the package. This ensures that when we try to run the task
 using the execution system, we can successfully download it and
 install its requirements.
+
+The methodology to install the package is simply to use the first
+segment in a package path. For example if the task is
+=foo.bar.baz.MyTask=, deadlines will attempt to install the =foo=
+package. We can also explicitly set the package in the Pipline YAML.
+
+#+BEGIN_SRC yaml
+  task: foo.bar.baz.MyTask
+  package: foo.bar
+#+END_SRC
+
+This will cause deadlines to use =foo.bar= as the package name when
+installing it locally for discovering targets and on the remote
+hosts when running the task.
+
 
 ** The Executor: Dadd
 
@@ -316,50 +315,72 @@ task that can be started from the scheduler.
 
 For most tasks, the goal is to provide a library of targets and tasks
 that will help in migrating data as needed. Here are some basic use
-cases:
+cases.
 
- - Create a new Dataset / Datafile base on PDL Current and the latest
-   BIX Metrics using Redshift:
+**** Use Case: Create a new Dataset / Datafile base on PDL Current and the latest BIX Metrics using Redshift
+Targets:
 
-   - Targets:
-     - Datafile
-     - Dataset
-     - QQ7Csv
-     - QQ7PDLCsv
-     - RedshiftTable
+  - Datafile
+  - Dataset
+  - QQ7Csv
+  - QQ7PDLCsv
+  - RedshiftTable
 
-   - Potential Task:
-     - PDLCurrentTask
-     - BIXMetricsTask
-     - BIXDailyTask
-     - SyncRedshift
-     - RedshiftQuery
+Potential Tasks:
 
-   - Description: The different Dataset / Datafile ETL tasks would
-     each run to ensure the necessary dependencies are there before
-     syncing them to Redshift. The RedshiftQuery could then query
-     redshift and dump the results to S3 or Pangaea.
+  - PDLCurrentTask
+  - BIXMetricsTask
+  - BIXDailyTask
+  - SyncRedshift
+  - RedshiftQuery
 
- - Dump the latest logs from our log host to Pangaea every day.
-   - Targets: SSHHostFile
-   - Potential Task: PangaeaUpload
-   - Description: The task uploads a file on some host to a Pangaea
-     dataset.
+The different Dataset / Datafile ETL tasks would each run to ensure
+the necessary dependencies are there before syncing them to
+Redshift. The RedshiftQuery could then query redshift and dump the
+results to S3 or Pangaea.
 
- - Download Gryphon Data and save it to the project server
-   - Targets:
-     - SurveyData
-     - S3Target
-   - Potential Task: SurveyDataDownload
-   - Description: The task would download the data from Gryphon to a
-     local folder before copying it to the file server.
+**** Use Case: Dump the latest logs from our log host to Pangaea every day.
+Targets:
 
+ - SSHHostFile
+
+Potential Tasks:
+ - PangaeaUpload
+
+The task downloads the file from the host via scp and gzips the output
+before uploading it to Pangaea.
+
+
+**** Use Case: Download Gryphon Data and save it to the project server
+Targets:
+
+  - SurveyData
+  - S3Target
+
+Potential Task:
+  - SurveyDataDownload
+
+The task would download the data from Gryphon to a local folder before
+gzipping it and copying it to the file server. This is an example of a
+somewhat user specific pipeline that helps produce deliverables on a
+schedule. If we had a simple pattern for wrapping an R script in task
+that could be deployed as a Python package, the user might also run a
+small transformation
+
+**** Current Pangaea ETLs
 
 The current ETLs would all be migrated to tasks in a new pangaea.tasks
 package. This package would then be installed into deadlines, but more
 importantly, when the task runs on a dadd node, the newest version
 will be used avoiding the need to keep Deadlines in close sync with
-Pangaea ETLs.
+Pangaea ETLs as a job would never re-use the previously installed
+pangaea packages when it is run on the host. Uploading a new package
+should effectively be enough to use th latest code.
+
+The same goes for any other packaged tasks. If a user does recognize a
+bug in a user defined task, the means of fixing it to simply upload a
+new package and ensure we've defined the dependency without a upper
+limit.
 
 * Footnotes
 
@@ -375,3 +396,36 @@ I'd like to accept as many simple variations that make sense. All
 dates should be stored in UTC and we can use a user's timezone setting
 to translate 11:30pm Central to the correct UTC value before adding it
 to the database.
+
+[fn:3] The format would be translated to whatever scheduling system we
+choose. I'm pretty sure the example above uses a format that works
+with [[http://apscheduler.readthedocs.org/en/latest/][APScheduler]].
+
+[fn:4] The easy thing to do is simply to specify running a task at a
+specific time. With that said, it would be much nicer for important
+data to require a deadline that can be used to prioritize and/or
+scream louder when there is a problem. For example, if we have a
+client project that needs a deliverable by a certain date that
+requires specific data to be available, setting a deadline in the plan
+could scream loudly if the there is only a couple days left and the
+task hasn't completed successfully. The hope would be we could fix the
+issue before running out of time and, worst case scenario, communicate
+that we are going to be late with the data.
+
+In terms of specifying this, it could simply be a =deadline= key in
+the Pipeline YAML that uses the same semantics as the default
+schedule. This information could be used as a priority value in the
+scheduler and when handling errors.
+
+There is a lot of room for tweaking here, but an initial algorithm
+could be:
+
+ 1. execute a task at scheduled time
+ 2. check for a deadline
+ 3. check for previous runs with errors
+ 4. if there have been errors send an extra email (potentially to the
+    stakeholder who created the plan?) saying there have been problems
+    in previous runs and it is due by a certain date.
+
+I suspect that we'll hold off on this functionality in any initial
+iteration.
