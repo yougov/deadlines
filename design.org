@@ -4,7 +4,7 @@
 
 Deadlines provides a way to:
 
- - define pipelines based on targets, tasks and resources
+ - define pipelines based on tasks
  - schedule pipelines to run at specified times
  - record each pipeline's progress or failure
 
@@ -13,18 +13,160 @@ Deadlines provides a way to:
 #+begin_src dot :file flowchart.png
   digraph FlowChart {
           plan -> planner -> execution_plan -> executor;
-          plan [shape=note, label="Plan YAML"];
+          plan [shape=note, label="Pipeline YAML"];
           planner [label="Planner"];
           execution_plan [shape=record, label="{Tasks | Arguments}"];
           executor [label="Executor"];
   }
 #+end_src
 
-The deadlines planner accepts a YAML file describing what targets are
-required. It also describes when the plan should be executed (or when
-it should be finished by). The planner takes the specified tasks,
-targets and resources and compiles a list of tasks that need to be
-executed along with any arguments those tasks require.
+The deadlines planner accepts a Pipline YAML file describing what
+targets are required. It also describes when the plan should be
+executed (or when it should be finished by). The planner takes the
+specified tasks and compiles a list of tasks that need to be executed
+along with any arguments those tasks require.
+
+** Defining a Pipeline
+Here is a bare minimum pipeline definition that will basically create
+a file from scratch and save it to S3.
+
+#+begin_src yaml
+  name: Upload 100 Bottles of Beer Lyrics
+  schedule: daily
+  task: mypkg.BottlesOfBeerLyrics
+  args:
+    AWS_ACCESS_KEY_ID: ajjaohdlfkajshdfl
+    AWS_SECRET_ACCESS_KEY: laj;sdlkfjalsdjfakhjflakjh
+#+end_src
+
+The args are passed to the task in the constructor just as Luigi does
+normally.
+
+It should be noted that if a task ends up calling a number of
+subtasks, the initial task will need to be responsible for passing the
+subsequent arguments as needed.
+
+For example:
+
+#+begin_src python
+  class A(Task):
+      foo = Parameter()
+      bar = Parameter()
+      baz = Parameter()
+
+      def requires(self):
+          return [B(self.foo), C(self.bar)]
+
+      def output(self):
+          return LocalTarget('%s.csv.gz' % self.foo)
+
+      def run(self):
+          with self.output('r').open() as fh:
+              for i in range(1, 100):
+                  fh.write('%s bottles of beer on the wall\n' % i)
+#+end_src
+
+In this example our task accept `foo`, `bar` and `baz` arguments even
+though `run` method only requires `foo`. This is a valid way to create
+a super Task that wraps the subsequent required tasks.
+
+*** The Schedule
+
+The schedule can be written in a few helpful formats to make it easier
+for users. For example, in our minimal example we used `daily` as a
+value. The planner effectively translates this to:
+
+#+begin_src yaml
+  # Assuming the time was 11:34:12
+  schedule:
+    hour: 11
+    minutes: 34
+    seconds: 12
+    days: *
+    months: *
+    years: *
+#+end_src
+
+This uses a more verbose cron-like meaning to run the task daily. We
+can also specify a time:
+
+#+begin_src yaml
+schedule: daily @ 11:30pm
+#+end_src
+
+In this case the planner will parse the time and be sure it is
+scheduled daily at 11:30pm.
+
+Here is the basic grammar.
+
+#+begin_src text
+  schedule        := period, @, datetime_string
+  period          := "daily" / "bi-weekly" / "weekly" / "monthly"
+  datetime_string := ISO-8601 / day, times
+  <times>         := %I:%M:%S%p /
+                     %I:%M:%S %p /
+                     %I:%M%p /
+                     %I:%M %p /
+                     %H:%M /
+                     %H:%M:%S /
+                     %H:%M:%S
+  <day>           := %a / %A / # Mon or Monday for weekly / bi-weekly
+                     %d        # the day of the month for monthly
+#+end_src
+
+There can be as many formats as we'd like to support.[fn:2]
+
+If a format cannot be recognized an error will be thrown. For example,
+a schedule specifying "daily @ Mon 12:30pm" is incorrect because a
+daily occurance must happen every day, not just on Mondays.
+
+For clarity here are a few simple examples:
+
+ - daily @ 11:30pm
+ - weekly @ mon 12:30
+ - bi-weekly @ thu 2:30am
+ - monthly @ 1 9:45 am (The first of the month at 9:45 am)
+ - monthly @ 15 10:00 (The 15th of the month at 10 am)
+
+*** Dynamic Definitions
+
+There are many cases where a scheduled pipeline would want to utilize
+variables when describing what needs to be done. For example, if a job
+needed to execute daily, you might want to pass in the current date
+and the previous day as arguments when finding the targets that need
+to be created. We can do this using replacements in our Pipeline YAML.
+
+#+begin_src yaml
+  name: Daily Mail
+  schedule: daily
+  task: DailyMail
+  args:
+    start_date: $yesterday
+    end_date: $now
+#+end_src
+
+When the Planner receives this pipeline definition it will replace the
+arguments with the current datetime and "yesterday", the current
+datetime minus 1 day.
+
+*** Default Configuration[fn:1]
+
+As many tasks will need similar configuration details this will be
+provided each task. These values can be referenced in the arguments if
+need be.
+
+For example, if we defined in our deadlines master application that we
+should use a specific Pangaea instance, we could reference that config
+item in our Pipeline YAML.
+
+#+begin_src yaml
+  args:
+    pangaea_url: $PANGAEA_URL
+#+end_src
+
+The list of available values would be provided for the user when
+defining the pipeline in order to avoid unnecessary and error prone
+repition in pipeline definitions.
 
 ** Specifying Tasks
 
@@ -146,7 +288,9 @@ building. We could also consider taking the current scheduler from
 the luigi scheduler and its graph pieces and move them directly into
 deadlines.
 
-** Scheduling
+** Other Issues / Considerations
+
+*** Scheduling
 
 The initial iteration of Deadlines will focus on a single submission
 trigger to start the processes mentioned above. This can be triggered
@@ -155,7 +299,7 @@ using the celery's cron functionality.
 With that said, I'd propose to use [[http://apscheduler.readthedocs.org/en/3.0/][Advanced Python Scheduler]] to
 implement the scheduling of tasks.
 
-** Baseline User Experience
+*** Baseline User Experience
 
 The basic requirement for a user is to:
 
@@ -168,7 +312,7 @@ exists on our cheeseshop. In the case of a complex task, the user
 must also understand enough about luigi in order to construct a proper
 task that can be started from the scheduler.
 
-** Task / Target Library
+*** Task / Target Library
 
 For most tasks, the goal is to provide a library of targets and tasks
 that will help in migrating data as needed. Here are some basic use
@@ -217,136 +361,17 @@ importantly, when the task runs on a dadd node, the newest version
 will be used avoiding the need to keep Deadlines in close sync with
 Pangaea ETLs.
 
-** Defining a Pipeline
-Here is a bare minimum pipeline definition that will basically create
-a file from scratch and save it to S3.
+* Footnotes
 
-#+begin_src yaml
-  name: Upload 100 Bottles of Beer Lyrics
-  schedule: daily
-  task: mypkg.BottlesOfBeerLyrics
-  args:
-    AWS_ACCESS_KEY_ID: ajjaohdlfkajshdfl
-    AWS_SECRET_ACCESS_KEY: laj;sdlkfjalsdjfakhjflakjh
-#+end_src
+[fn:1] The Pangaea ETLs utilize a default configuration that is passed
+to all ETLs. This greatly reduces the need to constantly provide
+database creds and the like. Seeing as deadlines could very well be
+more generic it makes sense to provide a similar catalog of helpful
+settings that can be used without constantly sending unnecessary
+credentials.
 
-The args are passed to the task in the constructor just as Luigi does
-normally.
-
-It should be noted that if a task ends up calling a number of
-subtasks, the initial task will need to be responsible for passing the
-subsequent arguments as needed.
-
-For example:
-
-#+begin_src python
-  class A(Task):
-      foo = Parameter()
-      bar = Parameter()
-      baz = Parameter()
-
-      def requires(self):
-          return [B(self.foo), C(self.bar)]
-
-      def output(self):
-          return LocalTarget('%s.csv.gz' % self.foo)
-
-      def run(self):
-          with self.output('r').open() as fh:
-              for i in range(1, 100):
-                  fh.write('%s bottles of beer on the wall\n' % i)
-#+end_src
-
-In this example our task accept `foo`, `bar` and `baz` arguments even
-though `run` method only requires `foo`. This is a valid way to create
-a super Task that wraps the subsequent required tasks.
-
-*** The Schedule
-
-The schedule can be written in a few helpful formats to make it easier
-for users. For example, in our minimal example we used `daily` as a
-value. The planner effectively translates this to:
-
-#+begin_src yaml
-  # Assuming the time was 11:34:12
-  schedule:
-    hour: 11
-    minutes: 34
-    seconds: 12
-    days: *
-    months: *
-    years: *
-#+end_src
-
-This uses a more verbose cron-like meaning to run the task daily. We
-can also specify a time:
-
-#+begin_src yaml
-schedule: daily @ 11:30pm
-#+end_src
-
-In this case the planner will parse the time and be sure it is
-scheduled daily at 11:30pm.
-
-Here is the basic grammar.
-
-#+begin_src text
-  schedule        := period, @, datetime_string
-  period          := "daily" / "bi-weekly" / "weekly" / "monthly"
-  datetime_string := ISO-8601 / day, times
-  <times>         := %I:%M:%S%p /
-                     %I:%M:%S %p /
-                     %I:%M%p /
-                     %I:%M %p /
-                     %H:%M /
-                     %H:%M:%S /
-                     %H:%M:%S
-  <day>           := %a / %A  # Mon or Monday
-#+end_src
-
-There can be as many formats as we'd like to support.
-
-If a format cannot be recognized an error will be thrown. For example,
-a schedule specifying "daily @ Mon 12:30pm" is incorrect because a
-daily occurance must happen every day, not just on Mondays.
-
-*** Dynamic Definitions
-
-There are many cases where a scheduled pipeline would want to utilize
-variables when describing what needs to be done. For example, if a job
-needed to execute daily, you might want to pass in the current date
-and the previous day as arguments when finding the targets that need
-to be created. We can do this using replacements in our Pipeline YAML.
-
-#+begin_src yaml
-  name: Daily Mail
-  schedule: daily
-  task: DailyMail
-  args:
-    start_date: $yesterday
-    end_date: $now
-#+end_src
-
-When the Planner receives this pipeline definition it will replace the
-arguments with the current datetime and "yesterday", the current
-datetime minus 1 day.
-
-** Other Ideas
-
-*** Multiple Tasks in a Pipeline
-
-If someone needed to set up a set of tasks that may not be entirely
-related, but that use the same arguments.
-
-#+begin_src yaml
-  name: Daily Jobs
-  schedule: daily
-  tasks:
-    - BIXDaily
-    - BIXMetrics
-    - DailyStats
-
-  args:
-    start_date: $yesterday
-    end_date: $now
-#+end_src
+[fn:2] Seeing as cron notation is exceedingly difficult to get right,
+I'd like to accept as many simple variations that make sense. All
+dates should be stored in UTC and we can use a user's timezone setting
+to translate 11:30pm Central to the correct UTC value before adding it
+to the database.
